@@ -13,12 +13,27 @@ from .transformer import TransformerEncoderLayerResidual
 
 
 # J: Max num joints between two limbs. 1 for 2D envs, 2 for unimal
+class ContextMLPEncoder(nn.Module):
+    def __init__(self, input_dim, latent_dim):
+        super(ContextMLPEncoder, self).__init__()
+        hidden_dims = list(cfg.MODEL.TRANSFORMER.EXT_HIDDEN_DIMS)
+        mlp_dims = [input_dim] + hidden_dims + [latent_dim]
+        self.encoder = tu.make_mlp_default(mlp_dims, final_nonlinearity=False)
+
+    def forward(self, x):
+        return self.encoder(x)
+
+
 class TransformerModel(nn.Module):
     def __init__(self, obs_space, decoder_out_dim):
         super(TransformerModel, self).__init__()
 
         self.model_args = cfg.MODEL.TRANSFORMER
         self.seq_len = cfg.MODEL.MAX_LIMBS
+        self.context_mode = cfg.MODEL.CONTEXT_MODE
+        self.context_latent_dim = cfg.MODEL.CONTEXT_LATENT_DIM
+        self.has_static_context = "static_context" in obs_space.spaces
+        self.has_adaptive_context = "adaptive_context" in obs_space.spaces
         # Embedding layer for per limb obs
         limb_obs_size = obs_space["proprioceptive"].shape[0] // self.seq_len
         self.d_model = cfg.MODEL.LIMB_EMBED_SIZE
@@ -45,12 +60,39 @@ class TransformerModel(nn.Module):
 
         # Map encoded observations to per node action mu or critic value
         decoder_input_dim = self.d_model
+        self.static_context_encoder = None
+        self.adaptive_context_encoder = None
+        self.hfield_encoder = None
+        self.context_keys = ["static_context", "adaptive_context", "hfield", "torso_height"]
+
+        if self.context_mode != "none":
+            if self.has_static_context:
+                self.static_context_encoder = ContextMLPEncoder(
+                    obs_space["static_context"].shape[0],
+                    self.context_latent_dim,
+                )
+                decoder_input_dim += self.context_latent_dim
+
+            adaptive_input_dim = 0
+            if self.has_adaptive_context:
+                adaptive_input_dim += obs_space["adaptive_context"].shape[0]
+            if "hfield" in obs_space.spaces:
+                adaptive_input_dim += obs_space["hfield"].shape[0]
+            if "torso_height" in obs_space.spaces:
+                adaptive_input_dim += obs_space["torso_height"].shape[0]
+
+            if adaptive_input_dim > 0:
+                self.adaptive_context_encoder = ContextMLPEncoder(
+                    adaptive_input_dim,
+                    self.context_latent_dim,
+                )
+                decoder_input_dim += self.context_latent_dim
 
         # Task based observation encoder
-        if "hfield" in cfg.ENV.KEYS_TO_KEEP:
+        if self.context_mode == "none" and "hfield" in cfg.ENV.KEYS_TO_KEEP:
             self.hfield_encoder = MLPObsEncoder(obs_space.spaces["hfield"].shape[0])
 
-        if self.ext_feat_fusion == "late":
+        if self.ext_feat_fusion == "late" and self.hfield_encoder is not None:
             decoder_input_dim += self.hfield_encoder.obs_feat_dim
 
         # self.decoder = nn.Linear(decoder_input_dim, decoder_out_dim)
@@ -67,16 +109,58 @@ class TransformerModel(nn.Module):
         initrange = cfg.MODEL.TRANSFORMER.DECODER_INIT
         self.decoder[-1].weight.data.uniform_(-initrange, initrange)
 
-    def forward(self, obs, obs_mask, obs_env, obs_cm_mask, return_attention=False):
+    def forward(
+        self,
+        obs,
+        obs_mask,
+        obs_env,
+        obs_cm_mask,
+        obs_context=None,
+        return_attention=False,
+    ):
         # (num_limbs, batch_size, limb_obs_size) -> (num_limbs, batch_size, d_model)
         obs_embed = self.limb_embed(obs) * math.sqrt(self.d_model)
         _, batch_size, _ = obs_embed.shape
 
-        if "hfield" in cfg.ENV.KEYS_TO_KEEP:
+        fused_context = None
+        if self.static_context_encoder is not None and obs_context is not None:
+            if "static_context" in obs_context:
+                static_latent = self.static_context_encoder(obs_context["static_context"])
+            else:
+                static_latent = None
+        else:
+            static_latent = None
+
+        if self.adaptive_context_encoder is not None and obs_context is not None:
+            adaptive_inputs = []
+            if "adaptive_context" in obs_context:
+                adaptive_inputs.append(obs_context["adaptive_context"])
+            if "hfield" in obs_context:
+                adaptive_inputs.append(obs_context["hfield"])
+            if "torso_height" in obs_context:
+                adaptive_inputs.append(obs_context["torso_height"])
+            if adaptive_inputs:
+                adaptive_context = torch.cat(adaptive_inputs, dim=1)
+                adaptive_latent = self.adaptive_context_encoder(adaptive_context)
+            else:
+                adaptive_latent = None
+        else:
+            adaptive_latent = None
+
+        if static_latent is not None or adaptive_latent is not None:
+            context_latents = []
+            if static_latent is not None:
+                context_latents.append(static_latent)
+            if adaptive_latent is not None:
+                context_latents.append(adaptive_latent)
+            fused_context = torch.cat(context_latents, dim=1)
+            fused_context = fused_context.unsqueeze(0).expand(self.seq_len, -1, -1)
+
+        if self.context_mode == "none" and "hfield" in cfg.ENV.KEYS_TO_KEEP:
             # (batch_size, embed_size)
             hfield_obs = self.hfield_encoder(obs_env["hfield"])
 
-        if self.ext_feat_fusion in ["late"]:
+        if self.ext_feat_fusion in ["late"] and self.hfield_encoder is not None:
             hfield_obs = hfield_obs.repeat(self.seq_len, 1)
             hfield_obs = hfield_obs.reshape(self.seq_len, batch_size, -1)
 
@@ -95,7 +179,9 @@ class TransformerModel(nn.Module):
             )
 
         decoder_input = obs_embed_t
-        if "hfield" in cfg.ENV.KEYS_TO_KEEP and self.ext_feat_fusion == "late":
+        if fused_context is not None:
+            decoder_input = torch.cat([decoder_input, fused_context], axis=2)
+        elif self.context_mode == "none" and "hfield" in cfg.ENV.KEYS_TO_KEEP and self.ext_feat_fusion == "late":
             decoder_input = torch.cat([decoder_input, hfield_obs], axis=2)
 
         # (num_limbs, batch_size, J)
@@ -184,6 +270,11 @@ class ActorCritic(nn.Module):
             batch_size = cfg.PPO.NUM_ENVS
 
         obs_env = {k: obs[k] for k in cfg.ENV.KEYS_TO_KEEP}
+        obs_context = {
+            k: obs[k]
+            for k in ["static_context", "adaptive_context", "hfield", "torso_height"]
+            if k in obs
+        }
         if "obs_padding_cm_mask" in obs:
             obs_cm_mask = obs["obs_padding_cm_mask"]
         else:
@@ -201,7 +292,12 @@ class ActorCritic(nn.Module):
         obs = obs.reshape(batch_size, self.seq_len, -1).permute(1, 0, 2)
         # Per limb critic values
         limb_vals, v_attention_maps = self.v_net(
-            obs, obs_mask, obs_env, obs_cm_mask, return_attention=return_attention
+            obs,
+            obs_mask,
+            obs_env,
+            obs_cm_mask,
+            obs_context=obs_context,
+            return_attention=return_attention,
         )
         # Zero out mask values
         limb_vals = limb_vals * (1 - obs_mask.int())
@@ -210,7 +306,12 @@ class ActorCritic(nn.Module):
         val = torch.divide(torch.sum(limb_vals, dim=1, keepdim=True), num_limbs)
 
         mu, mu_attention_maps = self.mu_net(
-            obs, obs_mask, obs_env, obs_cm_mask, return_attention=return_attention
+            obs,
+            obs_mask,
+            obs_env,
+            obs_cm_mask,
+            obs_context=obs_context,
+            return_attention=return_attention,
         )
         std = torch.exp(self.log_std)
         pi = Normal(mu, std)

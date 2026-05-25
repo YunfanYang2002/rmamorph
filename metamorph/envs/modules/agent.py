@@ -144,6 +144,12 @@ class Agent:
         return np.vstack((joint_to, joint_from)).T.flatten()
 
     def get_limb_obs(self, sim):
+        return self._select_obs(self._get_limb_obs_dict(sim))
+
+    def get_joint_obs(self, sim):
+        return self._select_obs(self._get_joint_obs_dict(sim))
+
+    def _get_limb_obs_dict(self, sim):
         obs = {}
         body_idxs = self.agent_body_idxs
         obs["body_idx"] = self._get_one_hot_body_idx()
@@ -167,9 +173,9 @@ class Agent:
         obs["body_mass"] = sim.model.body_mass[body_idxs].copy()[:, np.newaxis]
         obs["body_shape"] = sim.model.geom_size[self.agent_geom_idxs, :2].copy()
         obs["body_friction"] = sim.model.geom_friction[self.agent_geom_idxs, 0:1].copy()
-        return self._select_obs(obs)
+        return obs
 
-    def get_joint_obs(self, sim):
+    def _get_joint_obs_dict(self, sim):
         obs = {}
         qpos = sim.data.qpos.flat[7:].copy()
         qvel = sim.data.qvel.flat[6:].copy()
@@ -186,7 +192,7 @@ class Agent:
         obs["armature"] = sim.model.dof_armature[6:].copy()[:, np.newaxis]
         obs["damping"] = sim.model.dof_damping[6:].copy()[:, np.newaxis]
 
-        return self._select_obs(obs)
+        return obs
 
     def _get_one_hot_body_idx(self):
         body_idxs = self.agent_body_idxs
@@ -205,6 +211,65 @@ class Agent:
             return np.hstack(tuple(obs_to_ret))
         else:
             return None
+
+    def _stack_fields(self, obs, keys):
+        fields = []
+        for key in keys:
+            if key in obs:
+                fields.append(obs[key])
+        if not len(fields):
+            return None
+        return np.hstack(fields)
+
+    def _build_context_obs(self, limb_obs, joint_obs, env):
+        static_limb = self._stack_fields(
+            limb_obs, cfg.MODEL.STATIC_CONTEXT_LIMB_OBS_TYPES
+        )
+        static_joint = self._stack_fields(
+            joint_obs, cfg.MODEL.STATIC_CONTEXT_JOINT_OBS_TYPES
+        )
+        adaptive_limb = self._stack_fields(
+            limb_obs, cfg.MODEL.ADAPTIVE_CONTEXT_LIMB_OBS_TYPES
+        )
+        adaptive_joint = self._stack_fields(
+            joint_obs, cfg.MODEL.ADAPTIVE_CONTEXT_JOINT_OBS_TYPES
+        )
+
+        static_context = self._combine_limb_joint_obs_fixed(
+            static_limb, static_joint, env
+        )
+        adaptive_context = self._combine_limb_joint_obs_fixed(
+            adaptive_limb, adaptive_joint, env
+        )
+
+        return static_context, adaptive_context
+
+    def _combine_limb_joint_obs_fixed(self, limb_obs, joint_obs, env):
+        # Pad context to MAX_LIMBS so multi-embodiment training keeps a fixed shape.
+        max_limbs = cfg.MODEL.MAX_LIMBS
+        num_limbs = len(self.agent_body_idxs)
+        limb_obs_size = 0 if limb_obs is None else limb_obs.shape[1]
+        joint_obs_size = 0 if joint_obs is None else joint_obs.shape[1]
+
+        limb_obs_padded = np.zeros((max_limbs, limb_obs_size))
+        if limb_obs is not None:
+            limb_obs_padded[:num_limbs, :] = limb_obs
+
+        joint_obs_padded = np.zeros((max_limbs, joint_obs_size * 2))
+        if joint_obs is not None:
+            joint_obs_padded = joint_obs_padded.reshape(-1, joint_obs_size)
+            joint_mask = list(self.joint_mask_for_node_graph)
+            joint_mask += [False] * (max_limbs * 2 - len(joint_mask))
+            joint_obs_padded[np.asarray(joint_mask, dtype=bool), :] = joint_obs
+            joint_obs_padded = joint_obs_padded.reshape(max_limbs, -1)
+        else:
+            joint_obs_padded = joint_obs_padded.reshape(max_limbs, -1)
+
+        obs = np.hstack((limb_obs_padded, joint_obs_padded))
+
+        if cfg.MIRROR_DATA_AUG and env.metadata["mirrored"]:
+            obs = obs[env.metadata["o_to_m"], :]
+        return obs.flatten()
 
     def combine_limb_joint_obs(self, limb_obs, joint_obs, env):
         # Create node centric observations where each node observation is
@@ -228,11 +293,18 @@ class Agent:
         return obs.flatten()
 
     def observation_step(self, env, sim):
-        limb_obs = self.get_limb_obs(sim)
-        joint_obs = self.get_joint_obs(sim)
+        limb_obs_raw = self._get_limb_obs_dict(sim)
+        joint_obs_raw = self._get_joint_obs_dict(sim)
+        limb_obs = self._select_obs(limb_obs_raw)
+        joint_obs = self._select_obs(joint_obs_raw)
+        static_context, adaptive_context = self._build_context_obs(
+            limb_obs_raw, joint_obs_raw, env
+        )
         return {
             "proprioceptive": self.combine_limb_joint_obs(limb_obs, joint_obs, env),
-            "edges": self.edges
+            "edges": self.edges,
+            "static_context": static_context,
+            "adaptive_context": adaptive_context,
         }
 
     def _add_fixed_cameras(self, worldbody):

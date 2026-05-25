@@ -332,7 +332,7 @@ _C.MODEL = CN()
 # Type of actor critic model: ActorCritic
 _C.MODEL.ACTOR_CRITIC = "ActorCritic"
 
-_C.MODEL.LIMB_EMBED_SIZE = 128
+_C.MODEL.LIMB_EMBED_SIZE = 64
 
 _C.MODEL.JOINT_EMBED_SIZE = 128
 
@@ -357,13 +357,51 @@ _C.MODEL.PROPRIOCEPTIVE_OBS_TYPES = [
 ]
 
 # Model specific observation types to keep
-_C.MODEL.OBS_TYPES = ["proprioceptive", "edges", "obs_padding_mask", "act_padding_mask"]
+_C.MODEL.OBS_TYPES = [
+    "proprioceptive",
+    "edges",
+    "obs_padding_mask",
+    "act_padding_mask",
+    "static_context",
+    "adaptive_context",
+]
 
 # Observations to normalize via VecNormalize
 _C.MODEL.OBS_TO_NORM = ["proprioceptive"]
 
 # Wrappers to add specific to model
 _C.MODEL.WRAPPERS = ["MultiUnimalNodeCentricObservation", "MultiUnimalNodeCentricAction"]
+
+# Teacher-style context conditioning for cross-embodiment adaptation
+_C.MODEL.CONTEXT_MODE = "teacher"
+_C.MODEL.CONTEXT_LATENT_DIM = 16
+_C.MODEL.STATIC_CONTEXT_LIMB_OBS_TYPES = [
+    "body_idx",
+    "body_pos",
+    "body_ipos",
+    "body_iquat",
+    "geom_quat",
+    "body_mass",
+    "body_shape",
+    "body_friction",
+]
+_C.MODEL.STATIC_CONTEXT_JOINT_OBS_TYPES = [
+    "joint_range",
+    "joint_axis",
+    "gear",
+    "armature",
+    "damping",
+]
+_C.MODEL.ADAPTIVE_CONTEXT_LIMB_OBS_TYPES = [
+    "body_xpos",
+    "body_xquat",
+    "body_xvelp",
+    "body_xvelr",
+]
+_C.MODEL.ADAPTIVE_CONTEXT_JOINT_OBS_TYPES = [
+    "qpos",
+    "qvel",
+]
 
 # --------------------------------------------------------------------------- #
 # Transformer Options
@@ -374,13 +412,13 @@ _C.MODEL.TRANSFORMER = CN()
 _C.MODEL.TRANSFORMER.NHEAD = 2
 
 # TransformerEncoderLayer (dim_feedforward)
-_C.MODEL.TRANSFORMER.DIM_FEEDFORWARD = 1024
+_C.MODEL.TRANSFORMER.DIM_FEEDFORWARD = 256
 
 # TransformerEncoderLayer (dropout)
 _C.MODEL.TRANSFORMER.DROPOUT = 0.0
 
 # Number of TransformerEncoderLayer in TransformerEncoder
-_C.MODEL.TRANSFORMER.NLAYERS = 5
+_C.MODEL.TRANSFORMER.NLAYERS = 3
 
 # Init for input embedding
 _C.MODEL.TRANSFORMER.EMBED_INIT = 0.1
