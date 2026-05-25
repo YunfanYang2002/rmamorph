@@ -332,7 +332,7 @@ _C.MODEL = CN()
 # Type of actor critic model: ActorCritic
 _C.MODEL.ACTOR_CRITIC = "ActorCritic"
 
-_C.MODEL.LIMB_EMBED_SIZE = 64
+_C.MODEL.LIMB_EMBED_SIZE = 128
 
 _C.MODEL.JOINT_EMBED_SIZE = 128
 
@@ -374,7 +374,7 @@ _C.MODEL.WRAPPERS = ["MultiUnimalNodeCentricObservation", "MultiUnimalNodeCentri
 
 # Teacher-style context conditioning for cross-embodiment adaptation
 _C.MODEL.CONTEXT_MODE = "teacher"
-_C.MODEL.CONTEXT_LATENT_DIM = 16
+_C.MODEL.CONTEXT_LATENT_DIM = 32
 _C.MODEL.STATIC_CONTEXT_LIMB_OBS_TYPES = [
     "body_idx",
     "body_pos",
@@ -412,13 +412,13 @@ _C.MODEL.TRANSFORMER = CN()
 _C.MODEL.TRANSFORMER.NHEAD = 2
 
 # TransformerEncoderLayer (dim_feedforward)
-_C.MODEL.TRANSFORMER.DIM_FEEDFORWARD = 256
+_C.MODEL.TRANSFORMER.DIM_FEEDFORWARD = 1024
 
 # TransformerEncoderLayer (dropout)
 _C.MODEL.TRANSFORMER.DROPOUT = 0.0
 
 # Number of TransformerEncoderLayer in TransformerEncoder
-_C.MODEL.TRANSFORMER.NLAYERS = 3
+_C.MODEL.TRANSFORMER.NLAYERS = 5
 
 # Init for input embedding
 _C.MODEL.TRANSFORMER.EMBED_INIT = 0.1
