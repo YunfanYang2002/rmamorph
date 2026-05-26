@@ -53,7 +53,7 @@ class MultiEnvWrapper(utils.EzPickle):
         self._env.close()
 
     def _get_unimal_seq(self):
-        path = os.path.join(cfg.OUT_DIR, "sampling.json")
+        path = os.path.join(cfg.OUT_DIR, "sampling_rank{}.json".format(cfg.RANK))
         env_seq = fu.load_json(path)
         chunks = fu.chunkify(env_seq, cfg.PPO.NUM_ENVS)
         return chunks[self.multi_env_idx]

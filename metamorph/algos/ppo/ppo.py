@@ -1,26 +1,34 @@
 import os
 import time
+from datetime import datetime
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from metamorph.config import cfg
+from metamorph.envs.vec_env.running_mean_std import (
+    update_mean_var_count_from_moments,
+)
 from metamorph.envs.vec_env.vec_video_recorder import VecVideoRecorder
+from metamorph.utils import distributed as du
 from metamorph.utils import file as fu
 from metamorph.utils import model as mu
 from metamorph.utils import optimizer as ou
 from metamorph.utils.meter import TrainMeter
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils import tensorboard
 from torch.utils.tensorboard import SummaryWriter
 
 from .buffer import Buffer
 from .envs import get_ob_rms
+from .envs import get_vec_normalize
 from .envs import make_vec_envs
 from .envs import set_ob_rms
 from .inherit_weight import restore_from_checkpoint
 from .model import ActorCritic
 from .model import Agent
+
 
 class PPO:
     def __init__(self, print_model=True):
@@ -30,50 +38,68 @@ class PPO:
 
         self.device = torch.device(cfg.DEVICE)
 
-        self.actor_critic = globals()[cfg.MODEL.ACTOR_CRITIC](
+        self.actor_critic_model = globals()[cfg.MODEL.ACTOR_CRITIC](
             self.envs.observation_space, self.envs.action_space
         )
 
         # Used while using train_ppo.py
         if cfg.PPO.CHECKPOINT_PATH:
-            ob_rms = restore_from_checkpoint(self.actor_critic)
+            ob_rms = restore_from_checkpoint(self.actor_critic_model)
             set_ob_rms(self.envs, ob_rms)
 
-        if print_model:
-            print(self.actor_critic)
-            print("Num params: {}".format(mu.num_params(self.actor_critic)))
+        if print_model and du.is_main_process():
+            print(self.actor_critic_model)
+            print("Num params: {}".format(mu.num_params(self.actor_critic_model)))
 
-        self.actor_critic.to(self.device)
+        self.actor_critic_model.to(self.device)
+        if du.is_distributed():
+            self.actor_critic = DDP(
+                self.actor_critic_model,
+                device_ids=[cfg.LOCAL_RANK] if self.device.type == "cuda" else None,
+                output_device=cfg.LOCAL_RANK if self.device.type == "cuda" else None,
+            )
+        else:
+            self.actor_critic = self.actor_critic_model
         self.agent = Agent(self.actor_critic)
 
         # Setup experience buffer
         self.buffer = Buffer(self.envs.observation_space, self.envs.action_space.shape)
         # Optimizer for both actor and critic
         self.optimizer = optim.Adam(
-            self.actor_critic.parameters(), lr=cfg.PPO.BASE_LR, eps=cfg.PPO.EPS
+            self.actor_critic_model.parameters(), lr=cfg.PPO.BASE_LR, eps=cfg.PPO.EPS
         )
 
         self.train_meter = TrainMeter()
-        self.writer = SummaryWriter(log_dir=os.path.join(cfg.OUT_DIR, "tensorboard"))
+        self.writer = None
+        if du.is_main_process():
+            tb_root = os.path.join(cfg.OUT_DIR, "tensorboard")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_name = "run_lr{}_gamma{}_enc{}_ac{}_{}".format(
+                cfg.PPO.BASE_LR,
+                cfg.PPO.GAMMA,
+                getattr(cfg.MODEL, "ENCODER_TYPE", "default"),
+                cfg.MODEL.ACTOR_CRITIC,
+                timestamp,
+            )
+            log_dir = os.path.join(tb_root, run_name)
+            self.writer = SummaryWriter(log_dir=log_dir)
+
         # Get the param name for log_std term, can vary depending on arch
         for name, param in self.actor_critic.state_dict().items():
             if "log_std" in name:
                 self.log_std_param = name
                 break
 
-        # for name, weight in self.actor_critic.named_parameters():
-        #     print(name, weight.requires_grad)
-
         self.fps = 0
 
     def train(self):
         self.save_sampled_agent_seq(0)
+        du.synchronize()
         obs = self.envs.reset()
         self.buffer.to(self.device)
         self.start = time.time()
 
         for cur_iter in range(cfg.PPO.MAX_ITERS):
-
             if cfg.PPO.EARLY_EXIT and cur_iter >= cfg.PPO.EARLY_EXIT_MAX_ITERS:
                 break
 
@@ -104,24 +130,22 @@ class PPO:
 
             next_val = self.agent.get_value(obs)
             self.buffer.compute_returns(next_val)
+            self.sync_vec_normalize()
             self.train_on_batch(cur_iter)
             self.save_sampled_agent_seq(cur_iter)
+            du.synchronize()
 
             self.train_meter.update_mean()
-            if len(self.train_meter.mean_ep_rews["reward"]):
+            if self.writer and len(self.train_meter.mean_ep_rews["reward"]):
                 cur_rew = self.train_meter.mean_ep_rews["reward"][-1]
-                self.writer.add_scalar(
-                    'Reward', cur_rew, self.env_steps_done(cur_iter)
-                )
-            if (
-                cur_iter > 0
-                and cur_iter % cfg.LOG_PERIOD == 0
-                and cfg.LOG_PERIOD > 0
-            ):
-                self._log_stats(cur_iter)
-                self.save_model()
+                self.writer.add_scalar("Reward", cur_rew, self.env_steps_done(cur_iter))
+            if cur_iter > 0 and cur_iter % cfg.LOG_PERIOD == 0 and cfg.LOG_PERIOD > 0:
+                if du.is_main_process():
+                    self._log_stats(cur_iter)
+                    self.save_model()
 
-        print("Finished Training: {}".format(self.file_prefix))
+        if du.is_main_process():
+            print("Finished Training: {}".format(self.file_prefix))
 
     def train_on_batch(self, cur_iter):
         adv = self.buffer.ret - self.buffer.val
@@ -136,6 +160,9 @@ class PPO:
                 clip_ratio = cfg.PPO.CLIP_EPS
                 ratio = torch.exp(logp - batch["logp_old"])
                 approx_kl = (batch["logp_old"] - logp).mean().item()
+                approx_kl = du.reduce_scalar(
+                    approx_kl, average=False, op=torch.distributed.ReduceOp.MAX
+                )
 
                 if approx_kl > cfg.PPO.KL_TARGET_COEF * 0.01:
                     return
@@ -166,28 +193,38 @@ class PPO:
 
                 # Log training stats
                 norm = nn.utils.clip_grad_norm_(
-                    self.actor_critic.parameters(), cfg.PPO.MAX_GRAD_NORM
+                    self.actor_critic_model.parameters(), cfg.PPO.MAX_GRAD_NORM
                 )
-                self.train_meter.add_train_stat("grad_norm", norm.item())
+                self.train_meter.add_train_stat(
+                    "grad_norm", du.reduce_scalar(norm.item())
+                )
 
-                log_std = (
-                    self.actor_critic.state_dict()[self.log_std_param].cpu().numpy()[0]
-                )
+                log_std = self.actor_critic.state_dict()[self.log_std_param].cpu().numpy()[0]
                 std = np.mean(np.exp(log_std))
-                self.train_meter.add_train_stat("std", float(std))
+                self.train_meter.add_train_stat("std", du.reduce_scalar(float(std)))
 
                 self.train_meter.add_train_stat("approx_kl", approx_kl)
-                self.train_meter.add_train_stat("pi_loss", pi_loss.item())
-                self.train_meter.add_train_stat("val_loss", val_loss.item())
-                self.train_meter.add_train_stat("ratio", ratio.mean().item())
-                self.train_meter.add_train_stat("surr1", surr1.mean().item())
-                self.train_meter.add_train_stat("surr2", surr2.mean().item())
+                self.train_meter.add_train_stat(
+                    "pi_loss", du.reduce_scalar(pi_loss.item())
+                )
+                self.train_meter.add_train_stat(
+                    "val_loss", du.reduce_scalar(val_loss.item())
+                )
+                self.train_meter.add_train_stat(
+                    "ratio", du.reduce_scalar(ratio.mean().item())
+                )
+                self.train_meter.add_train_stat(
+                    "surr1", du.reduce_scalar(surr1.mean().item())
+                )
+                self.train_meter.add_train_stat(
+                    "surr2", du.reduce_scalar(surr2.mean().item())
+                )
 
                 self.optimizer.step()
 
         # Save weight histogram
-        if cfg.SAVE_HIST_WEIGHTS:
-            for name, weight in self.actor_critic.named_parameters():
+        if cfg.SAVE_HIST_WEIGHTS and self.writer:
+            for name, weight in self.actor_critic_model.named_parameters():
                 self.writer.add_histogram(name, weight, cur_iter)
                 try:
                     self.writer.add_histogram(f"{name}.grad", weight.grad, cur_iter)
@@ -196,9 +233,11 @@ class PPO:
                     continue
 
     def save_model(self, path=None):
+        if not du.is_main_process():
+            return
         if not path:
             path = os.path.join(cfg.OUT_DIR, self.file_prefix + ".pt")
-        torch.save([self.actor_critic, get_ob_rms(self.envs)], path)
+        torch.save([self.actor_critic_model, get_ob_rms(self.envs)], path)
 
     def _log_stats(self, cur_iter):
         self._log_fps(cur_iter)
@@ -216,9 +255,11 @@ class PPO:
             )
 
     def env_steps_done(self, cur_iter):
-        return (cur_iter + 1) * cfg.PPO.NUM_ENVS * cfg.PPO.TIMESTEPS
+        return (cur_iter + 1) * cfg.PPO.NUM_ENVS * cfg.PPO.TIMESTEPS * cfg.WORLD_SIZE
 
     def save_rewards(self, path=None, hparams=None):
+        if not du.is_main_process():
+            return
         if not path:
             file_name = "{}_results.json".format(self.file_prefix)
             path = os.path.join(cfg.OUT_DIR, file_name)
@@ -236,12 +277,14 @@ class PPO:
                 k: v for k, v in hparams.items() if not isinstance(v, list)
             }
             final_env_reward = np.mean(stats["__env__"]["reward"]["reward"][-100:])
-            self.writer.add_hparams(hparams_to_save, {"reward": final_env_reward})
+            if self.writer:
+                self.writer.add_hparams(hparams_to_save, {"reward": final_env_reward})
 
-        self.writer.close()
+        if self.writer:
+            self.writer.close()
 
     def save_video(self, save_dir):
-        env = make_vec_envs(training=False, norm_rew=False, save_video=True,)
+        env = make_vec_envs(training=False, norm_rew=False, save_video=True)
         set_ob_rms(env, get_ob_rms(self.envs))
 
         env = VecVideoRecorder(
@@ -277,7 +320,7 @@ class PPO:
             else:
                 if cfg.TASK_SAMPLING.AVG_TYPE == "ema":
                     ep_lens = [
-                        np.mean(self.train_meter.agent_meters[agent].ep_len_ema)
+                        self.train_meter.agent_meters[agent].ep_len_ema
                         for agent in cfg.ENV.WALKERS
                     ]
                 elif cfg.TASK_SAMPLING.AVG_TYPE == "moving_window":
@@ -285,16 +328,29 @@ class PPO:
                         np.mean(self.train_meter.agent_meters[agent].ep_len)
                         for agent in cfg.ENV.WALKERS
                     ]
+        else:
+            ep_lens = [1000] * num_agents
 
-        probs = [1000.0 / l for l in ep_lens]
-        probs = np.power(probs, cfg.TASK_SAMPLING.PROB_ALPHA)
-        probs = [p / sum(probs) for p in probs]
+        # Robustify against invalid EMA values (-1), NaN and non-positive lens.
+        ep_lens = np.asarray(ep_lens, dtype=np.float64)
+        invalid_mask = ~np.isfinite(ep_lens) | (ep_lens <= 0.0)
+        ep_lens[invalid_mask] = 1000.0
+
+        probs = 1000.0 / ep_lens
+        probs = np.power(np.maximum(probs, 0.0), cfg.TASK_SAMPLING.PROB_ALPHA)
+        probs_sum = probs.sum()
+        if not np.isfinite(probs_sum) or probs_sum <= 0:
+            probs = np.ones(num_agents, dtype=np.float64) / num_agents
+        else:
+            probs = probs / probs_sum
 
         # Estimate approx number of episodes each subproc env can rollout
-        avg_ep_len = np.mean([
-            np.mean(self.train_meter.agent_meters[agent].ep_len)
-            for agent in cfg.ENV.WALKERS
-        ])
+        avg_ep_len = np.mean(
+            [
+                np.mean(self.train_meter.agent_meters[agent].ep_len)
+                for agent in cfg.ENV.WALKERS
+            ]
+        )
         # In the start the arrays will be empty
         if np.isnan(avg_ep_len):
             avg_ep_len = 100
@@ -303,5 +359,38 @@ class PPO:
         size = int(ep_per_env * cfg.PPO.NUM_ENVS * 50)
         task_list = np.random.choice(range(0, num_agents), size=size, p=probs)
         task_list = [int(_) for _ in task_list]
-        path = os.path.join(cfg.OUT_DIR, "sampling.json")
+        path = os.path.join(cfg.OUT_DIR, "sampling_rank{}.json".format(cfg.RANK))
         fu.save_json(task_list, path)
+
+    def sync_vec_normalize(self):
+        if not du.is_distributed():
+            return
+
+        vec_norm = get_vec_normalize(self.envs)
+        self._sync_running_mean_std(vec_norm.ret_rms)
+        for obs_rms in vec_norm.ob_rms.values():
+            self._sync_running_mean_std(obs_rms)
+
+    def _sync_running_mean_std(self, rms):
+        gathered = du.all_gather_object((rms.mean, rms.var, rms.count))
+        valid_stats = []
+        for batch_mean, batch_var, batch_count in gathered:
+            if batch_count is None or batch_count <= 0 or not np.isfinite(batch_count):
+                continue
+            batch_mean = np.asarray(batch_mean, dtype=np.float64)
+            batch_var = np.asarray(batch_var, dtype=np.float64)
+            if not np.all(np.isfinite(batch_mean)) or not np.all(np.isfinite(batch_var)):
+                continue
+            valid_stats.append((batch_mean, batch_var, float(batch_count)))
+
+        if not valid_stats:
+            return
+
+        mean, var, count = valid_stats[0]
+        for batch_mean, batch_var, batch_count in valid_stats[1:]:
+            mean, var, count = update_mean_var_count_from_moments(
+                mean, var, count, batch_mean, batch_var, batch_count
+            )
+        rms.mean = mean
+        rms.var = var
+        rms.count = count
