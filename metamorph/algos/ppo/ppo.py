@@ -73,6 +73,7 @@ class PPO:
         self.writer = None
         if du.is_main_process():
             tb_root = os.path.join(cfg.OUT_DIR, "tensorboard")
+            os.makedirs(tb_root, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             run_name = "run_lr{}_gamma{}_enc{}_ac{}_{}".format(
                 cfg.PPO.BASE_LR,
@@ -82,6 +83,7 @@ class PPO:
                 timestamp,
             )
             log_dir = os.path.join(tb_root, run_name)
+            os.makedirs(log_dir, exist_ok=True)
             self.writer = SummaryWriter(log_dir=log_dir)
 
         # Get the param name for log_std term, can vary depending on arch
@@ -281,6 +283,7 @@ class PPO:
                 self.writer.add_hparams(hparams_to_save, {"reward": final_env_reward})
 
         if self.writer:
+            self.writer.flush()
             self.writer.close()
 
     def save_video(self, save_dir):

@@ -84,29 +84,6 @@ def get_hparams():
     return hparams
 
 
-def cleanup_tensorboard():
-    tb_dir = os.path.join(cfg.OUT_DIR, "tensorboard")
-
-    # Assume there is only one sub_dir and break when it's found
-    for content in os.listdir(tb_dir):
-        content = os.path.join(tb_dir, content)
-        if os.path.isdir(content):
-            break
-
-    # Return if no dir found
-    if not os.path.isdir(content):
-        return
-
-    # Move all the event files from sub_dir to tb_idr
-    for event_file in os.listdir(content):
-        src = os.path.join(content, event_file)
-        dst = os.path.join(tb_dir, event_file)
-        fu.move_file(src, dst)
-
-    # Delete the sub_dir
-    os.rmdir(content)
-
-
 def parse_args():
     """Parses the arguments."""
     parser = argparse.ArgumentParser(description="Train a RL agent")
@@ -138,8 +115,6 @@ def ppo_train():
     hparams = get_hparams()
     PPOTrainer.save_rewards(hparams=hparams)
     PPOTrainer.save_model()
-    if du.is_main_process():
-        cleanup_tensorboard()
 
 
 def main():
