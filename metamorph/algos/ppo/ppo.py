@@ -72,14 +72,16 @@ class PPO:
         self.train_meter = TrainMeter()
         self.writer = None
         if du.is_main_process():
-            tb_root = os.path.join(cfg.OUT_DIR, "tensorboard")
+            run_mode_tag = cfg.get_run_mode_tag()
+            tb_root = os.path.join(cfg.OUT_DIR, "tensorboard", run_mode_tag)
             os.makedirs(tb_root, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            run_name = "run_lr{}_gamma{}_enc{}_ac{}_{}".format(
+            run_name = "run_lr{}_gamma{}_enc{}_ac{}_{}_{}".format(
                 cfg.PPO.BASE_LR,
                 cfg.PPO.GAMMA,
                 getattr(cfg.MODEL, "ENCODER_TYPE", "default"),
                 cfg.MODEL.ACTOR_CRITIC,
+                cfg.get_run_name(),
                 timestamp,
             )
             log_dir = os.path.join(tb_root, run_name)
@@ -98,6 +100,7 @@ class PPO:
         self.save_sampled_agent_seq(0)
         du.synchronize()
         obs = self.envs.reset()
+        self.agent.reset_history()
         self.buffer.to(self.device)
         self.start = time.time()
 
@@ -128,6 +131,7 @@ class PPO:
                 )
 
                 self.buffer.insert(obs, act, logp, val, reward, masks, timeouts)
+                self.agent.reset_history(done)
                 obs = next_obs
 
             next_val = self.agent.get_value(obs)
@@ -297,6 +301,7 @@ class PPO:
             video_length=cfg.PPO.VIDEO_LENGTH,
             file_prefix=self.file_prefix,
         )
+        self.agent.reset_history()
         obs = env.reset()
 
         for _ in range(cfg.PPO.VIDEO_LENGTH + 1):

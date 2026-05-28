@@ -10,6 +10,7 @@ from metamorph.envs.wrappers.hfield import StandReward
 from metamorph.envs.wrappers.hfield import TerminateOnFalling
 from metamorph.envs.wrappers.hfield import TerminateOnEscape
 from metamorph.envs.wrappers.hfield import UnimalHeightObs
+from metamorph.envs.wrappers.history import HistoryContextWrapper
 from metamorph.envs.wrappers.multi_env_wrapper import MultiUnimalNodeCentricAction
 from metamorph.envs.wrappers.multi_env_wrapper import MultiUnimalNodeCentricObservation
 

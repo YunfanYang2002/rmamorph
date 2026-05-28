@@ -34,6 +34,7 @@ class TransformerModel(nn.Module):
         self.context_latent_dim = cfg.MODEL.CONTEXT_LATENT_DIM
         self.has_static_context = "static_context" in obs_space.spaces
         self.has_adaptive_context = "adaptive_context" in obs_space.spaces
+        self.has_history_context = "history_context" in obs_space.spaces
         # Embedding layer for per limb obs
         limb_obs_size = obs_space["proprioceptive"].shape[0] // self.seq_len
         self.d_model = cfg.MODEL.LIMB_EMBED_SIZE
@@ -62,8 +63,15 @@ class TransformerModel(nn.Module):
         decoder_input_dim = self.d_model
         self.static_context_encoder = None
         self.adaptive_context_encoder = None
+        self.history_context_encoder = None
         self.hfield_encoder = None
-        self.context_keys = ["static_context", "adaptive_context", "hfield", "torso_height"]
+        self.context_keys = [
+            "static_context",
+            "adaptive_context",
+            "history_context",
+            "hfield",
+            "torso_height",
+        ]
 
         if self.context_mode != "none":
             if self.has_static_context:
@@ -73,17 +81,25 @@ class TransformerModel(nn.Module):
                 )
                 decoder_input_dim += self.context_latent_dim
 
-            adaptive_input_dim = 0
-            if self.has_adaptive_context:
-                adaptive_input_dim += obs_space["adaptive_context"].shape[0]
-            if "hfield" in obs_space.spaces:
-                adaptive_input_dim += obs_space["hfield"].shape[0]
-            if "torso_height" in obs_space.spaces:
-                adaptive_input_dim += obs_space["torso_height"].shape[0]
+            if self.context_mode in ["teacher", "hybrid"]:
+                adaptive_input_dim = 0
+                if self.has_adaptive_context:
+                    adaptive_input_dim += obs_space["adaptive_context"].shape[0]
+                if "hfield" in obs_space.spaces:
+                    adaptive_input_dim += obs_space["hfield"].shape[0]
+                if "torso_height" in obs_space.spaces:
+                    adaptive_input_dim += obs_space["torso_height"].shape[0]
 
-            if adaptive_input_dim > 0:
-                self.adaptive_context_encoder = ContextMLPEncoder(
-                    adaptive_input_dim,
+                if adaptive_input_dim > 0:
+                    self.adaptive_context_encoder = ContextMLPEncoder(
+                        adaptive_input_dim,
+                        self.context_latent_dim,
+                    )
+                    decoder_input_dim += self.context_latent_dim
+
+            if self.context_mode in ["student", "hybrid"] and self.has_history_context:
+                self.history_context_encoder = ContextMLPEncoder(
+                    obs_space["history_context"].shape[0],
                     self.context_latent_dim,
                 )
                 decoder_input_dim += self.context_latent_dim
@@ -147,12 +163,22 @@ class TransformerModel(nn.Module):
         else:
             adaptive_latent = None
 
-        if static_latent is not None or adaptive_latent is not None:
+        if self.history_context_encoder is not None and obs_context is not None:
+            if "history_context" in obs_context:
+                history_latent = self.history_context_encoder(obs_context["history_context"])
+            else:
+                history_latent = None
+        else:
+            history_latent = None
+
+        if static_latent is not None or adaptive_latent is not None or history_latent is not None:
             context_latents = []
             if static_latent is not None:
                 context_latents.append(static_latent)
             if adaptive_latent is not None:
                 context_latents.append(adaptive_latent)
+            if history_latent is not None:
+                context_latents.append(history_latent)
             fused_context = torch.cat(context_latents, dim=1)
             fused_context = fused_context.unsqueeze(0).expand(self.seq_len, -1, -1)
 
@@ -263,6 +289,10 @@ class ActorCritic(nn.Module):
         else:
             self.log_std = nn.Parameter(torch.zeros(1, self.num_actions))
 
+    @property
+    def action_shape(self):
+        return [self.num_actions]
+
     def forward(self, obs, act=None, return_attention=False):
         if act is not None:
             batch_size = cfg.PPO.BATCH_SIZE
@@ -272,7 +302,13 @@ class ActorCritic(nn.Module):
         obs_env = {k: obs[k] for k in cfg.ENV.KEYS_TO_KEEP}
         obs_context = {
             k: obs[k]
-            for k in ["static_context", "adaptive_context", "hfield", "torso_height"]
+            for k in [
+                "static_context",
+                "adaptive_context",
+                "history_context",
+                "hfield",
+                "torso_height",
+            ]
             if k in obs
         }
         if "obs_padding_cm_mask" in obs:
@@ -334,18 +370,60 @@ class ActorCritic(nn.Module):
 class Agent:
     def __init__(self, actor_critic):
         self.ac = actor_critic
+        self.history_buffer = None
+        self.history_step_dim = None
+
+    def _ensure_history(self, obs):
+        proprio = obs["proprioceptive"]
+        batch_size = proprio.shape[0]
+        prop_dim = proprio.shape[1]
+        act_dim = self.ac.action_shape[0]
+        history_step_dim = prop_dim + act_dim
+        needs_init = (
+            self.history_buffer is None
+            or self.history_buffer.shape[0] != batch_size
+            or self.history_step_dim != history_step_dim
+        )
+        if needs_init:
+            self.history_step_dim = history_step_dim
+            self.history_buffer = torch.zeros(
+                batch_size,
+                cfg.MODEL.HISTORY_LEN,
+                history_step_dim,
+                device=proprio.device,
+                dtype=proprio.dtype,
+            )
+
+    def reset_history(self, dones=None):
+        if self.history_buffer is None:
+            return
+        if dones is None:
+            self.history_buffer.zero_()
+            return
+        done_mask = torch.as_tensor(dones, device=self.history_buffer.device).bool()
+        if done_mask.numel() != self.history_buffer.shape[0]:
+            self.history_buffer.zero_()
+            return
+        self.history_buffer[done_mask] = 0
 
     @torch.no_grad()
     def act(self, obs):
+        self._ensure_history(obs)
+        obs["history_context"] = self.history_buffer.reshape(obs["proprioceptive"].shape[0], -1)
         val, pi, _, _ = self.ac(obs)
         act = pi.sample()
         logp = pi.log_prob(act)
         act_mask = obs["act_padding_mask"].bool()
         logp[act_mask] = 0.0
         logp = logp.sum(-1, keepdim=True)
+        pair = torch.cat([obs["proprioceptive"], act], dim=1)
+        self.history_buffer = torch.roll(self.history_buffer, shifts=-1, dims=1)
+        self.history_buffer[:, -1, :] = pair
         return val, act, logp
 
     @torch.no_grad()
     def get_value(self, obs):
+        self._ensure_history(obs)
+        obs["history_context"] = self.history_buffer.reshape(obs["proprioceptive"].shape[0], -1)
         val, _, _, _ = self.ac(obs)
         return val

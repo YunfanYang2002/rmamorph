@@ -14,6 +14,7 @@ from metamorph.envs.wrappers.hfield import TerminateOnRotation
 from metamorph.envs.wrappers.hfield import TerminateOnTerrainEdge
 from metamorph.envs.wrappers.hfield import TerminateOnWallContact
 from metamorph.envs.wrappers.hfield import UnimalHeightObs
+from metamorph.envs.wrappers.history import HistoryContextWrapper
 from metamorph.envs.wrappers.multi_env_wrapper import MultiUnimalNodeCentricAction
 from metamorph.envs.wrappers.multi_env_wrapper import MultiUnimalNodeCentricObservation
 

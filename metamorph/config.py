@@ -364,17 +364,28 @@ _C.MODEL.OBS_TYPES = [
     "act_padding_mask",
     "static_context",
     "adaptive_context",
+    "history_context",
 ]
 
 # Observations to normalize via VecNormalize
 _C.MODEL.OBS_TO_NORM = ["proprioceptive"]
 
 # Wrappers to add specific to model
-_C.MODEL.WRAPPERS = ["MultiUnimalNodeCentricObservation", "MultiUnimalNodeCentricAction"]
+_C.MODEL.WRAPPERS = [
+    "MultiUnimalNodeCentricObservation",
+    "MultiUnimalNodeCentricAction",
+    "HistoryContextWrapper",
+]
 
-# Teacher-style context conditioning for cross-embodiment adaptation
-_C.MODEL.CONTEXT_MODE = "teacher"
-_C.MODEL.CONTEXT_LATENT_DIM = 32
+# Context conditioning mode for cross-embodiment adaptation
+# teacher: use privileged adaptive context
+# student: use history-based context
+# hybrid: use both privileged and history-based context
+# none: disable context conditioning
+_C.MODEL.CONTEXT_MODE = "student"
+_C.MODEL.CONTEXT_LATENT_DIM = 16
+_C.MODEL.HISTORY_LEN = 4
+_C.MODEL.HISTORY_HIDDEN_DIMS = [64]
 _C.MODEL.STATIC_CONTEXT_LIMB_OBS_TYPES = [
     "body_idx",
     "body_pos",
@@ -526,6 +537,33 @@ _C.DESC = ""
 _C.EXIT_ON_MJ_STEP_EXCEPTION = False
 
 _C.MIRROR_DATA_AUG = False
+
+
+def get_run_mode_tag():
+    """Build a short, human-readable tag for the current execution mode."""
+    mode = str(_C.MODEL.CONTEXT_MODE).strip().lower()
+    if mode == "none":
+        base = "baseline"
+    else:
+        base = mode
+
+    wrappers = set(_C.MODEL.WRAPPERS)
+    if "HistoryContextWrapper" in wrappers:
+        base = "{}_history".format(base)
+    else:
+        base = "{}_nohistory".format(base)
+
+    return base
+
+
+def get_run_name():
+    """Build a run name that includes mode information and a timestamp."""
+    parts = [get_run_mode_tag()]
+    desc = str(_C.DESC).strip()
+    if desc:
+        safe_desc = desc.replace(" ", "_").replace("/", "_").replace("\\", "_")
+        parts.append(safe_desc)
+    return "_".join(parts)
 
 def dump_cfg(cfg_name=None):
     """Dumps the config to the output directory."""
