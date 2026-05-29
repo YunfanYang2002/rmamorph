@@ -78,9 +78,16 @@ class PPO:
             date_tag = now.strftime("%Y%m%d")
             timestamp = now.strftime("%Y%m%d_%H%M%S")
             tb_root = os.path.join(cfg.OUT_DIR, "tensorboard", run_mode_tag, date_tag)
-            os.makedirs(tb_root, exist_ok=True)
             run_dir_name = self._next_run_dir_name(tb_root)
+            run_dir_name = "{}_{}".format(run_mode_tag, run_dir_name)
             log_dir = os.path.join(tb_root, run_dir_name)
+            print(
+                "[TensorBoard] mode_tag={} date_tag={} log_dir={}".format(
+                    run_mode_tag, date_tag, log_dir
+                ),
+                flush=True,
+            )
+            os.makedirs(tb_root, exist_ok=True)
             os.makedirs(log_dir, exist_ok=True)
             self.writer = SummaryWriter(log_dir=log_dir)
             run_meta = {
