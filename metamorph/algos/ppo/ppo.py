@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from metamorph.config import cfg
+from metamorph.config import get_run_mode_tag
 from metamorph.envs.vec_env.running_mean_std import (
     update_mean_var_count_from_moments,
 )
@@ -72,21 +73,32 @@ class PPO:
         self.train_meter = TrainMeter()
         self.writer = None
         if du.is_main_process():
-            run_mode_tag = cfg.get_run_mode_tag()
-            tb_root = os.path.join(cfg.OUT_DIR, "tensorboard", run_mode_tag)
+            run_mode_tag = get_run_mode_tag()
+            now = datetime.now()
+            date_tag = now.strftime("%Y%m%d")
+            timestamp = now.strftime("%Y%m%d_%H%M%S")
+            tb_root = os.path.join(cfg.OUT_DIR, "tensorboard", run_mode_tag, date_tag)
             os.makedirs(tb_root, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            run_name = "run_lr{}_gamma{}_enc{}_ac{}_{}_{}".format(
-                cfg.PPO.BASE_LR,
-                cfg.PPO.GAMMA,
-                getattr(cfg.MODEL, "ENCODER_TYPE", "default"),
-                cfg.MODEL.ACTOR_CRITIC,
-                cfg.get_run_name(),
-                timestamp,
-            )
-            log_dir = os.path.join(tb_root, run_name)
+            run_dir_name = self._next_run_dir_name(tb_root)
+            log_dir = os.path.join(tb_root, run_dir_name)
             os.makedirs(log_dir, exist_ok=True)
             self.writer = SummaryWriter(log_dir=log_dir)
+            run_meta = {
+                "mode_tag": run_mode_tag,
+                "date_tag": date_tag,
+                "timestamp": timestamp,
+                "run_dir": run_dir_name,
+                "log_dir": log_dir,
+                "base_lr": cfg.PPO.BASE_LR,
+                "gamma": cfg.PPO.GAMMA,
+                "encoder_type": getattr(cfg.MODEL, "ENCODER_TYPE", "default"),
+                "actor_critic": cfg.MODEL.ACTOR_CRITIC,
+                "context_mode": cfg.MODEL.CONTEXT_MODE,
+                "wrappers": list(cfg.MODEL.WRAPPERS),
+                "desc": cfg.DESC,
+                "rng_seed": cfg.RNG_SEED,
+            }
+            fu.save_json(run_meta, os.path.join(log_dir, "run_meta_{}.json".format(timestamp)))
 
         # Get the param name for log_std term, can vary depending on arch
         for name, param in self.actor_critic.state_dict().items():
@@ -95,6 +107,22 @@ class PPO:
                 break
 
         self.fps = 0
+
+    def _next_run_dir_name(self, date_dir):
+        prefix = "run_"
+        existing_ids = []
+        if os.path.exists(date_dir):
+            for name in os.listdir(date_dir):
+                path = os.path.join(date_dir, name)
+                if not os.path.isdir(path):
+                    continue
+                if not name.startswith(prefix):
+                    continue
+                suffix = name[len(prefix):]
+                if suffix.isdigit():
+                    existing_ids.append(int(suffix))
+        next_id = max(existing_ids) + 1 if existing_ids else 1
+        return "{}{:02d}".format(prefix, next_id)
 
     def train(self):
         self.save_sampled_agent_seq(0)
