@@ -2,6 +2,7 @@
 
 import copy
 import os
+from datetime import datetime
 
 from metamorph.yacs import CfgNode as CN
 
@@ -556,14 +557,11 @@ def get_run_mode_tag():
     return base
 
 
-def get_run_name():
-    """Build a run name that includes mode information and a timestamp."""
-    parts = [get_run_mode_tag()]
-    desc = str(_C.DESC).strip()
-    if desc:
-        safe_desc = desc.replace(" ", "_").replace("/", "_").replace("\\", "_")
-        parts.append(safe_desc)
-    return "_".join(parts)
+def get_run_name(timestamp=None):
+    """Build a short run name with mode and timestamp."""
+    if timestamp is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return "run_{}_{}".format(get_run_mode_tag(), timestamp)
 
 def dump_cfg(cfg_name=None):
     """Dumps the config to the output directory."""

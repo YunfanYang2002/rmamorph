@@ -1,0 +1,15 @@
+{
+  "mode_tag": "student_history",
+  "run_name": "run_student_history_20260529_143452",
+  "timestamp": "20260529_143452",
+  "base_lr": 0.0003,
+  "gamma": 0.99,
+  "encoder_type": "default",
+  "actor_critic": "ActorCritic",
+  "context_mode": "student",
+  "wrappers": [
+    "HistoryContextWrapper"
+  ],
+  "desc": "",
+  "rng_seed": 1409
+}

@@ -1,16 +1,17 @@
 import argparse
+import json
 import os
 import sys
+from datetime import datetime
 
 import torch
 
-from metamorph.algos.ppo.ppo import PPO
 from metamorph.config import cfg
 from metamorph.config import dump_cfg
+from metamorph.config import get_run_name
+from metamorph.config import get_run_mode_tag
 from metamorph.utils import distributed as du
-from metamorph.utils import file as fu
 from metamorph.utils import sample as su
-from metamorph.utils import sweep as swu
 
 
 def set_cfg_options():
@@ -19,9 +20,82 @@ def set_cfg_options():
     calculate_max_limbs_joints()
 
 
+def prepare_run_artifacts():
+    if not du.is_main_process():
+        return
+
+    now = datetime.now()
+    timestamp = now.strftime("%Y%m%d_%H%M%S")
+    run_name = get_run_name(timestamp)
+    log_dir = os.path.join(cfg.OUT_DIR, "tensorboard", run_name)
+    cfg_dir = os.path.join(log_dir, "cfg")
+
+    print(
+        "[TensorBoard] preparing log_dir={} mode_tag={}".format(
+            log_dir, get_run_mode_tag()
+        ),
+        flush=True,
+    )
+
+    os.makedirs(cfg_dir, exist_ok=True)
+    cfg.RUN_TIMESTAMP = timestamp
+    cfg.RUN_NAME = run_name
+    cfg.TB_LOG_DIR = log_dir
+    cfg.TB_CFG_DIR = cfg_dir
+
+    run_meta = {
+        "mode_tag": get_run_mode_tag(),
+        "run_name": run_name,
+        "timestamp": timestamp,
+        "base_lr": cfg.PPO.BASE_LR,
+        "gamma": cfg.PPO.GAMMA,
+        "encoder_type": getattr(cfg.MODEL, "ENCODER_TYPE", "default"),
+        "actor_critic": cfg.MODEL.ACTOR_CRITIC,
+        "context_mode": cfg.MODEL.CONTEXT_MODE,
+        "wrappers": list(cfg.MODEL.WRAPPERS),
+        "desc": cfg.DESC,
+        "rng_seed": cfg.RNG_SEED,
+    }
+    with open(os.path.join(cfg_dir, "run_meta_{}.json".format(timestamp)), "w") as f:
+        json.dump(run_meta, f, indent=2)
+    dump_cfg(os.path.join("tensorboard", run_name, "cfg", "config.yaml"))
+
+
+def finalize_run_artifacts():
+    if not du.is_main_process():
+        return
+
+    if not hasattr(cfg, "RUN_NAME"):
+        return
+
+    cfg_dir = os.path.join(cfg.OUT_DIR, "tensorboard", cfg.RUN_NAME, "cfg")
+    run_meta_path = os.path.join(cfg_dir, "run_meta_{}.json".format(cfg.RUN_TIMESTAMP))
+    run_meta = {
+        "mode_tag": get_run_mode_tag(),
+        "run_name": cfg.RUN_NAME,
+        "timestamp": cfg.RUN_TIMESTAMP,
+        "base_lr": cfg.PPO.BASE_LR,
+        "gamma": cfg.PPO.GAMMA,
+        "encoder_type": getattr(cfg.MODEL, "ENCODER_TYPE", "default"),
+        "actor_critic": cfg.MODEL.ACTOR_CRITIC,
+        "context_mode": cfg.MODEL.CONTEXT_MODE,
+        "wrappers": list(cfg.MODEL.WRAPPERS),
+        "desc": cfg.DESC,
+        "rng_seed": cfg.RNG_SEED,
+        "max_joints": getattr(cfg.MODEL, "MAX_JOINTS", None),
+        "max_limbs": getattr(cfg.MODEL, "MAX_LIMBS", None),
+        "walkers": list(cfg.ENV.WALKERS),
+    }
+    with open(run_meta_path, "w") as f:
+        json.dump(run_meta, f, indent=2)
+    dump_cfg(os.path.join("tensorboard", cfg.RUN_NAME, "cfg", "config.yaml"))
+
+
 def calculate_max_limbs_joints():
     if cfg.ENV_NAME != "Unimal-v0":
         return
+
+    from metamorph.utils import file as fu
 
     num_joints, num_limbs = [], []
 
@@ -69,6 +143,9 @@ def maybe_infer_walkers():
 
 
 def get_hparams():
+    from metamorph.utils import file as fu
+    from metamorph.utils import sweep as swu
+
     hparam_path = os.path.join(cfg.OUT_DIR, "hparam.json")
     # For local sweep return
     if not os.path.exists(hparam_path):
@@ -103,6 +180,8 @@ def parse_args():
 
 
 def ppo_train():
+    from metamorph.algos.ppo.ppo import PPO
+
     su.set_seed(cfg.RNG_SEED, idx=cfg.RANK)
     # Configure the CUDNN backend
     if torch.cuda.is_available():
@@ -125,8 +204,10 @@ def main():
     cfg.merge_from_file(args.cfg_file)
     cfg.merge_from_list(args.opts)
     du.init_distributed_mode()
+    prepare_run_artifacts()
     # Set cfg options which are inferred
     set_cfg_options()
+    finalize_run_artifacts()
     if du.is_main_process():
         os.makedirs(cfg.OUT_DIR, exist_ok=True)
         dump_cfg()
