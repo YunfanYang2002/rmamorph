@@ -8,8 +8,6 @@ import torch
 
 from metamorph.config import cfg
 from metamorph.config import dump_cfg
-from metamorph.config import get_run_name
-from metamorph.config import get_run_mode_tag
 from metamorph.utils import distributed as du
 from metamorph.utils import sample as su
 
@@ -18,6 +16,18 @@ def set_cfg_options():
     calculate_max_iters()
     maybe_infer_walkers()
     calculate_max_limbs_joints()
+
+
+def get_run_mode_tag():
+    mode = str(cfg.MODEL.CONTEXT_MODE).strip().lower()
+    base = "baseline" if mode == "none" else mode
+    if "HistoryContextWrapper" in set(getattr(cfg.MODEL, "WRAPPERS", [])):
+        return "{}_history".format(base)
+    return "{}_nohistory".format(base)
+
+
+def get_run_name(timestamp):
+    return "run_{}_{}".format(get_run_mode_tag(), timestamp)
 
 
 def prepare_run_artifacts():

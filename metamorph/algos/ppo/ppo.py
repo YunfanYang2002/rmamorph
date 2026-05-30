@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from metamorph.config import cfg
-from metamorph.config import get_run_name
 from metamorph.envs.vec_env.running_mean_std import (
     update_mean_var_count_from_moments,
 )
@@ -74,7 +73,7 @@ class PPO:
         if du.is_main_process():
             log_dir = getattr(cfg, "TB_LOG_DIR", None)
             if log_dir is None:
-                log_dir = os.path.join(cfg.OUT_DIR, "tensorboard", get_run_name())
+                log_dir = os.path.join(cfg.OUT_DIR, "tensorboard", cfg.ENV_NAME)
             print("[TensorBoard] log_dir={}".format(log_dir), flush=True)
             self.writer = SummaryWriter(log_dir=log_dir)
 
