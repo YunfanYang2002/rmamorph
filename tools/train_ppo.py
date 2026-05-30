@@ -19,7 +19,7 @@ def set_cfg_options():
 
 
 def get_run_mode_tag():
-    mode = str(cfg.MODEL.CONTEXT_MODE).strip().lower()
+    mode = str(getattr(cfg.MODEL, "CONTEXT_MODE", "none")).strip().lower()
     base = "baseline" if mode == "none" else mode
     if "HistoryContextWrapper" in set(getattr(cfg.MODEL, "WRAPPERS", [])):
         return "{}_history".format(base)
@@ -61,8 +61,8 @@ def prepare_run_artifacts():
         "gamma": cfg.PPO.GAMMA,
         "encoder_type": getattr(cfg.MODEL, "ENCODER_TYPE", "default"),
         "actor_critic": cfg.MODEL.ACTOR_CRITIC,
-        "context_mode": cfg.MODEL.CONTEXT_MODE,
-        "wrappers": list(cfg.MODEL.WRAPPERS),
+        "context_mode": getattr(cfg.MODEL, "CONTEXT_MODE", "none"),
+        "wrappers": list(getattr(cfg.MODEL, "WRAPPERS", [])),
         "desc": cfg.DESC,
         "rng_seed": cfg.RNG_SEED,
     }
@@ -88,8 +88,8 @@ def finalize_run_artifacts():
         "gamma": cfg.PPO.GAMMA,
         "encoder_type": getattr(cfg.MODEL, "ENCODER_TYPE", "default"),
         "actor_critic": cfg.MODEL.ACTOR_CRITIC,
-        "context_mode": cfg.MODEL.CONTEXT_MODE,
-        "wrappers": list(cfg.MODEL.WRAPPERS),
+        "context_mode": getattr(cfg.MODEL, "CONTEXT_MODE", "none"),
+        "wrappers": list(getattr(cfg.MODEL, "WRAPPERS", [])),
         "desc": cfg.DESC,
         "rng_seed": cfg.RNG_SEED,
         "max_joints": getattr(cfg.MODEL, "MAX_JOINTS", None),
